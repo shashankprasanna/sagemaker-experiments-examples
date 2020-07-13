@@ -1,15 +1,26 @@
+#TensorFlow and Keras
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.layers import Input, Dense, Flatten
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.optimizers import Adam, SGD
+from tensorflow.keras.optimizers import Adam, SGD, RMSprop
+from model_def import get_custom_model
+
+#System and utilities
 import argparse
 import os
 import re
 import time
+import numpy as np
+import random as python_random
 
-from smexperiments.tracker import Tracker
+#Fix random seed for reproducibility
+seed_value = 100
+os.environ['PYTHONHASHSEED']=str(seed_value)
+np.random.seed(seed_value)
+python_random.seed(seed_value)
+tf.set_random_seed(seed_value)
 
 HEIGHT = 32
 WIDTH = 32
@@ -65,7 +76,7 @@ def get_dataset(filenames, batch_size):
     dataset = dataset.batch(batch_size, drop_remainder=True)
     return dataset
 
-def get_model(model_type, input_shape, learning_rate, weight_decay, optimizer, momentum):
+def get_model(model_type, input_shape, learning_rate, weight_decay, momentum):
     input_tensor = Input(shape=input_shape)
     if model_type == 'resnet':
         base_model = keras.applications.resnet50.ResNet50(include_top=False,
@@ -79,7 +90,7 @@ def get_model(model_type, input_shape, learning_rate, weight_decay, optimizer, m
 
     elif model_type == 'vgg':
         base_model = keras.applications.vgg19.VGG19(include_top=False,
-                                                          weights=None,
+                                                          weights='imagenet',
                                                           input_tensor=input_tensor,
                                                           input_shape=input_shape,
                                                           classes=None)
@@ -88,7 +99,7 @@ def get_model(model_type, input_shape, learning_rate, weight_decay, optimizer, m
         model = Model(inputs=base_model.input, outputs=predictions)
 
     else:
-        model = get_custom_model(input_shape, learning_rate, weight_decay, optimizer, momentum)
+        model = get_custom_model(input_shape, learning_rate, weight_decay, momentum)
         
     return model
 
@@ -112,44 +123,32 @@ def main(args):
     eval_dataset  = get_dataset(eval_dir+'/eval.tfrecords', batch_size)
     
     input_shape = (HEIGHT, WIDTH, DEPTH)
-    model = get_model(model_type, input_shape, lr, weight_decay, optimizer, momentum)
+    model = get_model(model_type, input_shape, lr, weight_decay, momentum)
     
     # Optimizer
     if optimizer.lower() == 'sgd':
         opt = SGD(lr=lr, decay=weight_decay, momentum=momentum)
-    else:
+    elif optimizer.lower() == 'adam':
         opt = Adam(lr=lr, decay=weight_decay)
+    else:
+        opt = RMSprop(lr=lr, decay=weight_decay)
 
     # Compile model
     model.compile(optimizer=opt,
                   loss='categorical_crossentropy',
                   metrics=['accuracy'])
     
-    tracker = Tracker.load()
-    class TrackMetrics(tf.keras.callbacks.Callback):
-        def on_epoch_end(self, epoch, logs=None):
-            print(f"End epoch {epoch} of training; got log keys: {list(logs)}")
-            tracker.log_metric(metric_name='validation_accuracy', 
-                               value=logs["val_acc"], iteration_number=epoch)
-            tracker.log_metric(metric_name='validation_loss', 
-                               value=logs["val_loss"], iteration_number=epoch)
-            tracker.log_metric(metric_name='training_accuracy', 
-                               value=logs["acc"], iteration_number=epoch)
-            tracker.log_metric(metric_name='training_loss', 
-                               value=logs["loss"], iteration_number=epoch)
-    
     # Train model
-    history = model.fit(train_dataset, steps_per_epoch=40000 // batch_size,
+    history = model.fit(train_dataset, 
+                        steps_per_epoch=40000 // batch_size,
                         validation_data=val_dataset, 
                         validation_steps=10000 // batch_size,
-                        epochs=epochs,
-                        callbacks=[TrackMetrics()])
+                        epochs=epochs)
                         
     # Evaluate model performance
     score = model.evaluate(eval_dataset, steps=10000 // batch_size, verbose=1)
-    print('Test loss    :', score[0])
-    print('Test accuracy:', score[1])
-    tracker.log_metric(metric_name='test_accuracy', value=score[1])
+    print(f'test_loss: {score[0]}')
+    print(f'test_acc: {score[1]}')
     
     # Save model to model directory
     model.save(f'{os.environ["SM_MODEL_DIR"]}/{time.strftime("%m%d%H%M%S", time.gmtime())}', save_format='tf')
@@ -166,7 +165,7 @@ if __name__ == "__main__":
     parser.add_argument('--weight-decay',  type=float, default=2e-4)
     parser.add_argument('--momentum',      type=float, default='0.9')
     parser.add_argument('--optimizer',     type=str,   default='sgd')
-    parser.add_argument('--model',    type=str,   default='resnet')
+    parser.add_argument('--model',         type=str,   default='resnet')
 
     # SageMaker parameters
     parser.add_argument('--model_dir',        type=str)
